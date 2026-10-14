@@ -1,0 +1,18 @@
+[project]
+name = "dynamic-lora-loader-stack"
+version = "1.0.0"
+description = "A ComfyUI custom node, Dynamic LoRA loader stack. Toggle each LoRA on or off without setting it to None, and set a dynamic slot count from 1 to 50. Includes a single-strength node and a split model/CLIP strength node."
+license = { file = "LICENSE.txt" }
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/panjapongr/ComfyUI-DynamicLoraLoaderStack"
+
+[tool.comfy]
+PublisherId = "panjapong"
+DisplayName = "ComfyUI Dynamic LoRA Loader Stack"
+requires-comfyui = ">=0.3.0"

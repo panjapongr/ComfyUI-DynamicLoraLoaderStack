@@ -1,0 +1,4 @@
+# Files kept in git that should not ship in the registry archive
+.github/
+.comfyignore
+.gitignore
