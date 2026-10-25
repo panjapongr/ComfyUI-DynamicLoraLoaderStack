@@ -37,19 +37,60 @@ def _get_available_loras_map():
     except Exception:
         names = []
     mapping = {}
+    ci_mapping = {}
     for n in names:
         mapping[n] = n
-        mapping[n.replace("\\", "/")] = n
-        mapping[n.replace("/", "\\")] = n
-    return mapping
+        slash = n.replace("\\", "/")
+        backslash = n.replace("/", "\\")
+        mapping[slash] = n
+        mapping[backslash] = n
+
+        # Case-insensitive mapping for cross-OS workflows (Windows/macOS -> Linux)
+        ci_mapping.setdefault(n.lower(), n)
+        ci_mapping.setdefault(slash.lower(), n)
+        ci_mapping.setdefault(backslash.lower(), n)
+    return mapping, ci_mapping
 
 
-def _parse_preset(preset_str):
+def _validate_strength_value(val_str, line_idx, param_name="strength"):
+    try:
+        val = float(val_str)
+        if math.isnan(val) or math.isinf(val):
+            raise ValueError()
+    except (ValueError, TypeError):
+        return None, f"Invalid {param_name} value '{val_str}' on line {line_idx}: not a valid float."
+
+    if val < -100.0 or val > 100.0:
+        return None, (
+            f"{param_name} {val} on line {line_idx} is out of allowed range [-100.0, 100.0]."
+        )
+
+    # Step validation: step is 0.01 (maximum 2 decimal places)
+    clean_str = val_str.strip().lstrip("+-")
+    if "." in clean_str:
+        decimal_digits = clean_str.split(".", 1)[1]
+        if len(decimal_digits) > 2:
+            return None, (
+                f"Invalid {param_name} precision on line {line_idx}: '{val_str}'. "
+                f"Maximum precision is 2 decimal places (step 0.01)."
+            )
+
+    rounded = round(val, 2)
+    if abs(val - rounded) > 1e-6:
+        return None, (
+            f"Invalid {param_name} step on line {line_idx}: '{val_str}'. "
+            f"Must be a multiple of step 0.01."
+        )
+
+    return rounded, None
+
+
+def _parse_preset(preset_str, is_config=False):
     """Parse and validate preset or loaded_loras string.
 
     Returns:
         (parsed_items, error_message)
-        - If preset_str is None or empty/whitespace: returns (None, None) (preset inactive).
+        - If preset_str is None or empty/whitespace: returns (None, None) (preset inactive, keep existing LoRAs).
         - If valid: returns (list_of_dict, None).
         - If invalid: returns (None, error_str).
     """
@@ -58,23 +99,46 @@ def _parse_preset(preset_str):
     raw = str(preset_str).strip()
     if not raw:
         return None, None
+
     if raw.lower() == "(no loras applied)":
+        if is_config:
+            return None, (
+                "Invalid config_loras: minimum config_loras is 1 LoRA. "
+                "Leave it empty or disconnected to keep existing LoRAs."
+            )
         return [], None
 
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
     if not lines:
-        return [], None
+        return None, None
 
     header = lines[0]
     header_match = re.match(r"^(\d+)\s+loaded:\s*$", header, re.IGNORECASE)
     if not header_match:
+        if is_config:
+            return None, (
+                f"Invalid config_loras header '{header}'. First line must match '<N> loaded:' "
+                f"with at least 1 LoRA (or leave empty/disconnected to keep existing LoRAs)."
+            )
         return None, (
             f"Invalid preset header '{header}'. First line must match '<N> loaded:' "
             f"or '(no loras applied)'."
         )
 
     declared_count = int(header_match.group(1))
+    if is_config and declared_count < 1:
+        return None, (
+            f"Invalid config_loras: minimum config_loras is 1 LoRA (declared {declared_count}). "
+            f"Leave it empty or disconnected to keep existing LoRAs."
+        )
+
     lora_lines = lines[1:]
+
+    if is_config and len(lora_lines) < 1:
+        return None, (
+            "Invalid config_loras: minimum config_loras is 1 LoRA. Found 0 LoRA lines. "
+            "Leave it empty or disconnected to keep existing LoRAs."
+        )
 
     if len(lora_lines) != declared_count:
         return None, (
@@ -96,8 +160,8 @@ def _parse_preset(preset_str):
         if (
             not lora_name
             or ".." in lora_name
-            or lora_name.startswith(("/", "\\"))
-            or (len(lora_name) >= 2 and lora_name[1] == ":")
+            or lora_name.startswith(("/", "\\", ".", "~"))
+            or ":" in lora_name
             or any(ord(c) < 32 or ord(c) == 127 for c in lora_name)
             or re.search(r'[;&|`$<>"*?]', lora_name)
         ):
@@ -113,16 +177,9 @@ def _parse_preset(preset_str):
                     f"Invalid parameter on line {idx}: '{param}'. Expected 'strength=<number>'."
                 )
             val_str = param[len("strength="):].strip()
-            try:
-                val = float(val_str)
-                if math.isnan(val) or math.isinf(val):
-                    raise ValueError()
-            except (ValueError, TypeError):
-                return None, f"Invalid strength value '{val_str}' on line {idx}: not a valid float."
-            if val < -100.0 or val > 100.0:
-                return None, (
-                    f"Strength {val} on line {idx} is out of allowed range [-100.0, 100.0]."
-                )
+            val, err = _validate_strength_value(val_str, idx, "strength")
+            if err:
+                return None, err
             parsed.append({"name": lora_name, "mode": "single", "strength": val})
 
         else:
@@ -137,16 +194,9 @@ def _parse_preset(preset_str):
                     )
                 if k in kv:
                     return None, f"Duplicate parameter '{k}' on line {idx}."
-                try:
-                    val = float(v)
-                    if math.isnan(val) or math.isinf(val):
-                        raise ValueError()
-                except (ValueError, TypeError):
-                    return None, f"Invalid {k} strength value '{v}' on line {idx}: not a valid float."
-                if val < -100.0 or val > 100.0:
-                    return None, (
-                        f"{k} strength {val} on line {idx} is out of allowed range [-100.0, 100.0]."
-                    )
+                val, err = _validate_strength_value(v, idx, k)
+                if err:
+                    return None, err
                 kv[k] = val
             if "model" not in kv or "clip" not in kv:
                 return None, (
@@ -169,7 +219,7 @@ def _merge_loaded(prev, applied):
     """
     earlier = []
     if prev and str(prev).strip():
-        items, err = _parse_preset(prev)
+        items, err = _parse_preset(prev, is_config=False)
         if err:
             raise ValueError(f"Invalid prev_loaded_loras: {err}")
         if items:
@@ -295,15 +345,17 @@ class DynamicLoraLoaderStack:
         if config_loras is None:
             config_loras = kwargs.get("load_loras") or kwargs.get("loaded_loras")
         if config_loras is not None and isinstance(config_loras, str):
-            _, err = _parse_preset(config_loras)
-            if err:
-                return f"config_loras error: {err}"
+            if config_loras.strip():
+                _, err = _parse_preset(config_loras, is_config=True)
+                if err:
+                    return f"config_loras error: {err}"
 
         prev_loaded = kwargs.get("prev_loaded_loras")
         if prev_loaded is not None and isinstance(prev_loaded, str):
-            _, err = _parse_preset(prev_loaded)
-            if err:
-                return f"prev_loaded_loras error: {err}"
+            if prev_loaded.strip():
+                _, err = _parse_preset(prev_loaded, is_config=False)
+                if err:
+                    return f"prev_loaded_loras error: {err}"
 
         return True
 
@@ -332,13 +384,13 @@ class DynamicLoraLoaderStack:
             if config_loras is not None
             else (kwargs.get("config_loras") or kwargs.get("load_loras") or kwargs.get("loaded_loras"))
         )
-        preset_items, err = _parse_preset(preset_raw)
+        preset_items, err = _parse_preset(preset_raw, is_config=True)
         if err:
             raise ValueError(f"DynamicLoraLoaderStack preset error: {err}")
 
         prev_loaded = prev_loaded_loras if prev_loaded_loras is not None else kwargs.get("prev_loaded_loras")
         if prev_loaded and str(prev_loaded).strip():
-            _, prev_err = _parse_preset(prev_loaded)
+            _, prev_err = _parse_preset(prev_loaded, is_config=False)
             if prev_err:
                 raise ValueError(f"DynamicLoraLoaderStack prev_loaded_loras error: {prev_err}")
 
@@ -346,12 +398,12 @@ class DynamicLoraLoaderStack:
         applied = []
 
         if preset_items is not None:
-            available = _get_available_loras_map()
+            available, ci_available = _get_available_loras_map()
             slots_to_sync = []
             slot_idx = 1
             for item in preset_items[:MAX_LORAS]:
                 lora_name = item["name"]
-                canonical_name = available.get(lora_name)
+                canonical_name = available.get(lora_name) or ci_available.get(lora_name.lower())
                 if not canonical_name or canonical_name == "None":
                     continue
 
@@ -428,15 +480,17 @@ class DynamicLoraLoaderStackSplit:
         if config_loras is None:
             config_loras = kwargs.get("load_loras") or kwargs.get("loaded_loras")
         if config_loras is not None and isinstance(config_loras, str):
-            _, err = _parse_preset(config_loras)
-            if err:
-                return f"config_loras error: {err}"
+            if config_loras.strip():
+                _, err = _parse_preset(config_loras, is_config=True)
+                if err:
+                    return f"config_loras error: {err}"
 
         prev_loaded = kwargs.get("prev_loaded_loras")
         if prev_loaded is not None and isinstance(prev_loaded, str):
-            _, err = _parse_preset(prev_loaded)
-            if err:
-                return f"prev_loaded_loras error: {err}"
+            if prev_loaded.strip():
+                _, err = _parse_preset(prev_loaded, is_config=False)
+                if err:
+                    return f"prev_loaded_loras error: {err}"
 
         return True
 
@@ -465,13 +519,13 @@ class DynamicLoraLoaderStackSplit:
             if config_loras is not None
             else (kwargs.get("config_loras") or kwargs.get("load_loras") or kwargs.get("loaded_loras"))
         )
-        preset_items, err = _parse_preset(preset_raw)
+        preset_items, err = _parse_preset(preset_raw, is_config=True)
         if err:
             raise ValueError(f"DynamicLoraLoaderStackSplit preset error: {err}")
 
         prev_loaded = prev_loaded_loras if prev_loaded_loras is not None else kwargs.get("prev_loaded_loras")
         if prev_loaded and str(prev_loaded).strip():
-            _, prev_err = _parse_preset(prev_loaded)
+            _, prev_err = _parse_preset(prev_loaded, is_config=False)
             if prev_err:
                 raise ValueError(f"DynamicLoraLoaderStackSplit prev_loaded_loras error: {prev_err}")
 
@@ -479,12 +533,12 @@ class DynamicLoraLoaderStackSplit:
         applied = []
 
         if preset_items is not None:
-            available = _get_available_loras_map()
+            available, ci_available = _get_available_loras_map()
             slots_to_sync = []
             slot_idx = 1
             for item in preset_items[:MAX_LORAS]:
                 lora_name = item["name"]
-                canonical_name = available.get(lora_name)
+                canonical_name = available.get(lora_name) or ci_available.get(lora_name.lower())
                 if not canonical_name or canonical_name == "None":
                     continue
 

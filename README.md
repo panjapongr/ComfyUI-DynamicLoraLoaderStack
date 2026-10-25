@@ -85,10 +85,14 @@ You can wire a string in `loaded_loras` format into `config_loras` to drive the 
 - **Format Interoperability**:
   - The Single Strength node accepts both formats (if split format `model=X,clip=Y` is provided, it uses the strength from `model`).
   - The Split Strength node accepts both formats (if single format `strength=X` is provided, it assigns both model and CLIP the same value).
-- **Validation**: The input is strictly validated before execution. If the header count does not match the number of LoRA lines, if lines are malformed, or if strengths are invalid/out of range, an error is raised and the workflow will not run.
+- **Validation**: 
+  - If disconnected or the input string is empty, the node leaves all existing LoRA slots unchanged.
+  - If connected and provided with text, `config_loras` requires a minimum of 1 LoRA (e.g. `1 loaded:\n...`).
+  - If the header count does not match the number of LoRA lines, if lines are malformed, or if strengths are invalid, out of range [-100.0, 100.0], or exceed 2 decimal places (step 0.01), an error is raised and the workflow will not run.
 - **Security**: LoRA names are strictly inspected to disallow directory traversal (`..`), absolute paths, null bytes, and dangerous injection characters.
 - **Missing LoRAs**: If a LoRA in the preset is not installed, it is safely skipped.
 - **UI Synchronization**: Connecting a preset string (from a Primitive or Text node) or running the workflow automatically updates the node widgets (`lora_count`, dropdown selectors, and strength values) on the canvas to match the preset.
+- **Cross-Platform Compatibility**: Fully compatible with all operating systems supported by ComfyUI (Windows, Linux, macOS). Supports both `/` and `\` path separators, all line endings (CRLF, LF, CR), case-insensitive fallback matching (e.g. sharing workflows from Windows to Linux), and international UTF-8 filenames.
 - **Context Menu Options**: Right-clicking the node provides **"Apply Preset from Clipboard"** and **"Apply Preset from Text..."** to quickly populate node widgets directly from copied presets.
 
 ## Security

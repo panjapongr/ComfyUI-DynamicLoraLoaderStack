@@ -75,45 +75,74 @@ function syncSlots(node, mode) {
     app.canvas?.setDirty(true, true);
 }
 
+function validateStrengthPrecision(valStr) {
+    const clean = valStr.trim().replace(/^[+-]/, "");
+    if (clean.includes(".")) {
+        const decimals = clean.split(".")[1];
+        if (decimals.length > 2) return false;
+    }
+    const val = parseFloat(valStr);
+    if (Number.isNaN(val) || val < -100.0 || val > 100.0) return false;
+    return true;
+}
+
 function parsePresetText(presetStr, mode) {
     if (!presetStr || typeof presetStr !== "string") return null;
     const raw = presetStr.trim();
-    if (!raw || raw.toLowerCase() === "(no loras applied)") return [];
+    if (!raw || raw.toLowerCase() === "(no loras applied)") return null;
 
-    const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    if (!lines.length) return [];
+    const lines = raw.split(/\r\n|\r|\n/).map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) return null;
 
     const headerMatch = lines[0].match(/^(\d+)\s+loaded:\s*$/i);
     if (!headerMatch) return null;
 
+    const declaredCount = parseInt(headerMatch[1], 10);
+    if (Number.isNaN(declaredCount) || declaredCount < 1) return null;
+
     const loraLines = lines.slice(1);
+    if (!loraLines.length || loraLines.length !== declaredCount) return null;
     const slots = [];
     for (let i = 0; i < loraLines.length && i < MAX_LORAS; i++) {
         const parts = loraLines[i].split(",").map((p) => p.trim());
-        if (parts.length < 2 || parts.length > 3) continue;
+        if (parts.length < 2 || parts.length > 3 || parts.some((p) => !p)) return null;
 
         const name = parts[0];
+        if (
+            !name ||
+            name.includes("..") ||
+            name.startsWith("/") ||
+            name.startsWith("\\") ||
+            name.startsWith(".") ||
+            name.startsWith("~") ||
+            name.includes(":") ||
+            /[;&|`$<>"*?]/.test(name) ||
+            /[\x00-\x1f\x7f]/.test(name)
+        ) {
+            return null;
+        }
         let strength = 1.0;
         let strengthModel = 1.0;
         let strengthClip = 1.0;
 
         if (parts.length === 2) {
-            const m = parts[1].match(/^strength=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)$/);
-            if (m) {
-                strength = parseFloat(m[1]);
-                strengthModel = strength;
-                strengthClip = strength;
-            }
+            const m = parts[1].match(/^strength=([+-]?\d+(?:\.\d+)?)$/);
+            if (!m || !validateStrengthPrecision(m[1])) return null;
+            strength = Math.round(parseFloat(m[1]) * 100) / 100;
+            strengthModel = strength;
+            strengthClip = strength;
         } else if (parts.length === 3) {
-            const m1 = parts[1].match(/^(model|clip)=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)$/);
-            const m2 = parts[2].match(/^(model|clip)=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)$/);
-            if (m1 && m2) {
-                if (m1[1] === "model") strengthModel = parseFloat(m1[2]);
-                if (m1[1] === "clip") strengthClip = parseFloat(m1[2]);
-                if (m2[1] === "model") strengthModel = parseFloat(m2[2]);
-                if (m2[1] === "clip") strengthClip = parseFloat(m2[2]);
-                strength = strengthModel;
-            }
+            const m1 = parts[1].match(/^(model|clip)=([+-]?\d+(?:\.\d+)?)$/);
+            const m2 = parts[2].match(/^(model|clip)=([+-]?\d+(?:\.\d+)?)$/);
+            if (!m1 || !m2 || m1[1] === m2[1]) return null;
+            if (!validateStrengthPrecision(m1[2]) || !validateStrengthPrecision(m2[2])) return null;
+            const val1 = Math.round(parseFloat(m1[2]) * 100) / 100;
+            const val2 = Math.round(parseFloat(m2[2]) * 100) / 100;
+            if (m1[1] === "model") strengthModel = val1;
+            if (m1[1] === "clip") strengthClip = val1;
+            if (m2[1] === "model") strengthModel = val2;
+            if (m2[1] === "clip") strengthClip = val2;
+            strength = strengthModel;
         }
 
         slots.push({
@@ -209,10 +238,14 @@ function trySyncFromConnectedPreset(node, mode) {
         }
     }
 
-    if (text && text !== node._lastAppliedPresetText) {
+    // If disconnected or input is empty, do nothing to existing loras
+    if (!text || !text.trim()) return;
+
+    if (text !== node._lastAppliedPresetText) {
         node._lastAppliedPresetText = text;
         const slots = parsePresetText(text, mode);
-        if (slots) {
+        // Minimum config_loras is 1 LoRA
+        if (slots && slots.length >= 1) {
             applySlotsToNode(node, mode, slots);
         }
     }
@@ -283,10 +316,10 @@ function installHooks(nodeType, mode) {
                     try {
                         const text = await navigator.clipboard.readText();
                         const slots = parsePresetText(text, mode);
-                        if (slots && slots.length > 0) {
+                        if (slots && slots.length >= 1) {
                             applySlotsToNode(this, mode, slots);
                         } else {
-                            alert("Clipboard does not contain a valid LoRA preset (e.g. '2 loaded:\\n...').");
+                            alert("Clipboard does not contain a valid LoRA preset (minimum 1 LoRA required, e.g. '1 loaded:\\n...').");
                         }
                     } catch (e) {
                         alert("Could not read clipboard: " + e.message);
@@ -297,13 +330,12 @@ function installHooks(nodeType, mode) {
                 content: "Apply Preset from Text...",
                 callback: () => {
                     const text = prompt("Paste LoRA preset text:");
-                    if (text) {
-                        const slots = parsePresetText(text, mode);
-                        if (slots && slots.length > 0) {
-                            applySlotsToNode(this, mode, slots);
-                        } else {
-                            alert("Invalid LoRA preset format. Expected '<N> loaded:\\n...'.");
-                        }
+                    if (!text || !text.trim()) return;
+                    const slots = parsePresetText(text, mode);
+                    if (slots && slots.length >= 1) {
+                        applySlotsToNode(this, mode, slots);
+                    } else {
+                        alert("Invalid LoRA preset format. Minimum 1 LoRA required (expected '<N> loaded:\\n...' with N >= 1).");
                     }
                 },
             }
@@ -343,7 +375,7 @@ app.registerExtension({
 
 api.addEventListener("dynamic_lora_sync_ui", (event) => {
     const data = event.detail;
-    if (!data || !data.node_id) return;
+    if (!data || !data.node_id || !data.slots || data.slots.length < 1) return;
     const nodeId = String(data.node_id);
     const node = app.graph?._nodes?.find((n) => String(n.id) === nodeId);
     if (!node) return;
