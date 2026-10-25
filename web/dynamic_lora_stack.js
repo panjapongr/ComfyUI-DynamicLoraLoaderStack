@@ -189,7 +189,7 @@ function applySlotsToNode(node, mode, slots) {
 
 function trySyncFromConnectedPreset(node, mode) {
     if (!node || !node.inputs) return;
-    const input = node.inputs.find((i) => i.name === "load_loras");
+    const input = node.inputs.find((i) => i.name === "config_loras" || i.name === "load_loras");
     if (!input || input.link == null) return;
     const link = app.graph?.links?.[input.link];
     if (!link) return;

@@ -6,7 +6,7 @@ Two nodes in one pack:
 
 Both have a typed slot count (1-50, default 5) and a per-slot enable
 checkbox that skips loading without clearing the selector.
-Also supports an optional preset input (`load_loras`) in the same format
+Also supports an optional preset input (`config_loras`) in the same format
 as `loaded_loras` output.
 """
 
@@ -259,7 +259,7 @@ def _base_inputs():
             "CLIP",
             {"tooltip": "Optional. Leave disconnected to apply LoRAs to the model only."},
         ),
-        "load_loras": (
+        "config_loras": (
             "STRING",
             {
                 "forceInput": True,
@@ -291,13 +291,13 @@ class DynamicLoraLoaderStack:
 
     @classmethod
     def VALIDATE_INPUTS(cls, **kwargs):
-        load_loras = kwargs.get("load_loras")
-        if load_loras is None:
-            load_loras = kwargs.get("loaded_loras")
-        if load_loras is not None and isinstance(load_loras, str):
-            _, err = _parse_preset(load_loras)
+        config_loras = kwargs.get("config_loras")
+        if config_loras is None:
+            config_loras = kwargs.get("load_loras") or kwargs.get("loaded_loras")
+        if config_loras is not None and isinstance(config_loras, str):
+            _, err = _parse_preset(config_loras)
             if err:
-                return f"load_loras error: {err}"
+                return f"config_loras error: {err}"
 
         prev_loaded = kwargs.get("prev_loaded_loras")
         if prev_loaded is not None and isinstance(prev_loaded, str):
@@ -314,7 +314,7 @@ class DynamicLoraLoaderStack:
     DESCRIPTION = (
         "Stack LoRAs with a slot count (1-50, default 5) and a checkbox per slot. "
         "One strength is applied to both model and CLIP. Disabling a slot skips it "
-        "without removing the selected LoRA. Supports preset string input (load_loras)."
+        "without removing the selected LoRA. Supports preset string input (config_loras)."
     )
 
     def load_loras(
@@ -323,11 +323,15 @@ class DynamicLoraLoaderStack:
         lora_count,
         clip=None,
         prev_loaded_loras=None,
-        load_loras=None,
+        config_loras=None,
         unique_id=None,
         **kwargs,
     ):
-        preset_raw = load_loras if load_loras is not None else kwargs.get("loaded_loras")
+        preset_raw = (
+            config_loras
+            if config_loras is not None
+            else (kwargs.get("config_loras") or kwargs.get("load_loras") or kwargs.get("loaded_loras"))
+        )
         preset_items, err = _parse_preset(preset_raw)
         if err:
             raise ValueError(f"DynamicLoraLoaderStack preset error: {err}")
@@ -420,13 +424,13 @@ class DynamicLoraLoaderStackSplit:
 
     @classmethod
     def VALIDATE_INPUTS(cls, **kwargs):
-        load_loras = kwargs.get("load_loras")
-        if load_loras is None:
-            load_loras = kwargs.get("loaded_loras")
-        if load_loras is not None and isinstance(load_loras, str):
-            _, err = _parse_preset(load_loras)
+        config_loras = kwargs.get("config_loras")
+        if config_loras is None:
+            config_loras = kwargs.get("load_loras") or kwargs.get("loaded_loras")
+        if config_loras is not None and isinstance(config_loras, str):
+            _, err = _parse_preset(config_loras)
             if err:
-                return f"load_loras error: {err}"
+                return f"config_loras error: {err}"
 
         prev_loaded = kwargs.get("prev_loaded_loras")
         if prev_loaded is not None and isinstance(prev_loaded, str):
@@ -443,7 +447,7 @@ class DynamicLoraLoaderStackSplit:
     DESCRIPTION = (
         "Stack LoRAs with a slot count (1-50, default 5) and a checkbox per slot. "
         "Each slot has strength_model and strength_clip. Disabling a slot skips it "
-        "without removing the selected LoRA. Supports preset string input (load_loras)."
+        "without removing the selected LoRA. Supports preset string input (config_loras)."
     )
 
     def load_loras(
@@ -452,11 +456,15 @@ class DynamicLoraLoaderStackSplit:
         lora_count,
         clip=None,
         prev_loaded_loras=None,
-        load_loras=None,
+        config_loras=None,
         unique_id=None,
         **kwargs,
     ):
-        preset_raw = load_loras if load_loras is not None else kwargs.get("loaded_loras")
+        preset_raw = (
+            config_loras
+            if config_loras is not None
+            else (kwargs.get("config_loras") or kwargs.get("load_loras") or kwargs.get("loaded_loras"))
+        )
         preset_items, err = _parse_preset(preset_raw)
         if err:
             raise ValueError(f"DynamicLoraLoaderStackSplit preset error: {err}")
