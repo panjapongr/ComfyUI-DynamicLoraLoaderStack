@@ -39,6 +39,403 @@ function setWidgetVisible(widget, visible) {
     }
 }
 
+let activeLoraContext = null;
+
+function trackLoraWidgetClick(widget, node) {
+    if (!widget || !widget.name || !widget.name.startsWith("lora_")) return;
+    activeLoraContext = {
+        widget,
+        node,
+        value: widget.value,
+        time: Date.now(),
+    };
+}
+
+function findWidgetAtPos(node, pos) {
+    if (!node || !node.widgets) return null;
+    let yPos = null;
+    if (Array.isArray(pos)) {
+        yPos = pos[1];
+    } else if (pos && typeof pos.y === "number") {
+        yPos = pos.y;
+    } else if (pos && typeof pos[1] === "number") {
+        yPos = pos[1];
+    }
+    if (typeof yPos !== "number") return null;
+
+    for (const w of node.widgets) {
+        if (!w || w.hidden || w.type === "hidden") continue;
+        const wy = w.last_y;
+        if (wy != null) {
+            const h = (w.computeSize ? w.computeSize()[1] : null) || (typeof LiteGraph !== "undefined" && LiteGraph.NODE_WIDGET_HEIGHT ? LiteGraph.NODE_WIDGET_HEIGHT : 20);
+            if (yPos >= wy && yPos <= wy + h) {
+                return w;
+            }
+        }
+    }
+
+    // Closest widget fallback if click was near boundary
+    let closest = null;
+    let minDist = Infinity;
+    for (const w of node.widgets) {
+        if (!w || w.hidden || w.type === "hidden" || w.last_y == null) continue;
+        const h = (w.computeSize ? w.computeSize()[1] : null) || 20;
+        const midY = w.last_y + h / 2;
+        const dist = Math.abs(yPos - midY);
+        if (dist < minDist && dist < 35) {
+            minDist = dist;
+            closest = w;
+        }
+    }
+    return closest;
+}
+
+function hookCanvasProcessNodeWidgets() {
+    const CanvasClass = typeof LGraphCanvas !== "undefined" ? LGraphCanvas : (app.canvas ? app.canvas.constructor : null);
+    if (!CanvasClass || !CanvasClass.prototype || CanvasClass.prototype._dynWidgetHooked) return;
+    CanvasClass.prototype._dynWidgetHooked = true;
+
+    const origProcess = CanvasClass.prototype.processNodeWidgets;
+    if (origProcess) {
+        CanvasClass.prototype.processNodeWidgets = function (node, pos, event, activeWidget) {
+            try {
+                if (node && node.widgets) {
+                    const w = activeWidget || findWidgetAtPos(node, pos);
+                    if (w && w.name && w.name.startsWith("lora_")) {
+                        trackLoraWidgetClick(w, node);
+                    }
+                }
+            } catch (e) {}
+            return origProcess.apply(this, arguments);
+        };
+    }
+}
+
+function setupCanvasClickListener() {
+    const canvasEl = app.canvas?.canvas;
+    if (!canvasEl || canvasEl._dynListenerHooked) return;
+    canvasEl._dynListenerHooked = true;
+
+    canvasEl.addEventListener("mousedown", (e) => {
+        try {
+            const canvas = app.canvas;
+            if (!canvas) return;
+            const gm = canvas.graph_mouse;
+            if (!gm) return;
+
+            const nodes = canvas.graph?._nodes;
+            if (!nodes) return;
+            for (const node of nodes) {
+                if (!node || !NODES[node.comfyClass || node.type]) continue;
+                if (!node.pos || !node.size) continue;
+                if (
+                    gm[0] >= node.pos[0] &&
+                    gm[0] <= node.pos[0] + node.size[0] &&
+                    gm[1] >= node.pos[1] &&
+                    gm[1] <= node.pos[1] + node.size[1]
+                ) {
+                    const localY = gm[1] - node.pos[1];
+                    const w = findWidgetAtPos(node, [0, localY]);
+                    if (w && w.name && w.name.startsWith("lora_")) {
+                        trackLoraWidgetClick(w, node);
+                    }
+                    break;
+                }
+            }
+        } catch (err) {}
+    }, true);
+}
+
+function hookLoraWidget(widget, node) {
+    if (!widget || widget._dynFocusHooked) return;
+    widget._dynFocusHooked = true;
+
+    const origMouse = widget.mouse;
+    widget.mouse = function (event, pos, nodeRef) {
+        trackLoraWidgetClick(widget, nodeRef || node);
+        if (origMouse) {
+            return origMouse.apply(this, arguments);
+        }
+    };
+}
+
+function injectHighlightStyles() {
+    if (typeof document === "undefined") return;
+    const styleId = "dyn-lora-stack-menu-styles";
+    try {
+        let style = document.getElementById(styleId);
+        if (!style) {
+            style = document.createElement("style");
+            style.id = styleId;
+            document.head.appendChild(style);
+        }
+        style.textContent = `
+            .litecontextmenu .litemenu-entry.dyn-selected,
+            .litecontextmenu .litemenu-entry.selected,
+            .litecontextmenu .litemenu-entry.highlighted {
+                background-color: #2563eb !important;
+                color: #ffffff !important;
+                font-weight: 600 !important;
+                border-left: 4px solid #60a5fa !important;
+                padding-left: 8px !important;
+            }
+            .litecontextmenu .litemenu-entry.dyn-selected *,
+            .litecontextmenu .litemenu-entry.selected *,
+            .litecontextmenu .litemenu-entry.highlighted * {
+                color: #ffffff !important;
+            }
+            .litecontextmenu .litemenu-entry.dyn-selected:hover,
+            .litecontextmenu .litemenu-entry.selected:hover {
+                background-color: #1d4ed8 !important;
+                color: #ffffff !important;
+            }
+            .litecontextmenu .litemenu-entry.dyn-selected::before,
+            .litecontextmenu .litemenu-entry.selected::before {
+                content: none !important;
+                display: none !important;
+            }
+        `;
+    } catch (e) {}
+}
+
+function getElementTextOrValue(el) {
+    if (!el) return "";
+    let val = "";
+    if (typeof el.value === "string") {
+        val = el.value;
+    } else if (el.value && typeof el.value === "object") {
+        val = el.value.value || el.value.content || "";
+    }
+    if (!val && el.dataset && typeof el.dataset.value === "string") {
+        val = el.dataset.value;
+    }
+    if (!val && typeof el.textContent === "string") {
+        val = el.textContent;
+    }
+    return String(val || "").trim();
+}
+
+function focusSelectedOption(menu, targetValue) {
+    if (!menu || !menu.root || !targetValue) return;
+    const targetStr = String(targetValue).trim();
+    if (!targetStr || targetStr.toLowerCase() === "none") return;
+
+    try {
+        injectHighlightStyles();
+        const root = menu.root;
+        let entries = root.querySelectorAll(".litemenu-entry");
+        if (!entries || entries.length === 0) {
+            entries = root.querySelectorAll("[data-value], li, div");
+        }
+        if (!entries || entries.length === 0) return;
+
+        const targetNorm = targetStr.replace(/\\/g, "/").toLowerCase();
+        const targetNormNoExt = targetNorm.replace(/\.(safetensors|pt|ckpt|bin)$/i, "");
+        const targetBase = targetNormNoExt.split("/").pop();
+
+        let targetEntry = null;
+
+        // Pass 1: exact match
+        for (const el of entries) {
+            const rawVal = getElementTextOrValue(el);
+            if (!rawVal) continue;
+            const textNorm = rawVal.replace(/\\/g, "/").toLowerCase();
+            if (textNorm === targetNorm) {
+                targetEntry = el;
+                break;
+            }
+        }
+
+        // Pass 2: exact match ignoring extension
+        if (!targetEntry) {
+            for (const el of entries) {
+                const rawVal = getElementTextOrValue(el);
+                if (!rawVal) continue;
+                const textNorm = rawVal.replace(/\\/g, "/").toLowerCase();
+                const textNormNoExt = textNorm.replace(/\.(safetensors|pt|ckpt|bin)$/i, "");
+                if (textNormNoExt === targetNormNoExt) {
+                    targetEntry = el;
+                    break;
+                }
+            }
+        }
+
+        // Pass 3: subpath match (with or without extension)
+        if (!targetEntry) {
+            for (const el of entries) {
+                const rawVal = getElementTextOrValue(el);
+                if (!rawVal) continue;
+                const textNorm = rawVal.replace(/\\/g, "/").toLowerCase();
+                const textNormNoExt = textNorm.replace(/\.(safetensors|pt|ckpt|bin)$/i, "");
+                if (
+                    textNorm.endsWith("/" + targetNorm) ||
+                    targetNorm.endsWith("/" + textNorm) ||
+                    textNormNoExt.endsWith("/" + targetNormNoExt) ||
+                    targetNormNoExt.endsWith("/" + textNormNoExt)
+                ) {
+                    targetEntry = el;
+                    break;
+                }
+            }
+        }
+
+        // Pass 4: basename match fallback
+        if (!targetEntry && targetBase) {
+            for (const el of entries) {
+                const rawVal = getElementTextOrValue(el);
+                if (!rawVal) continue;
+                const textNormNoExt = rawVal.replace(/\\/g, "/").toLowerCase().replace(/\.(safetensors|pt|ckpt|bin)$/i, "");
+                const valBase = textNormNoExt.split("/").pop();
+                if (valBase === targetBase) {
+                    targetEntry = el;
+                    break;
+                }
+            }
+        }
+
+        if (targetEntry) {
+            // Remove previous highlight on all siblings
+            for (const el of entries) {
+                el.classList.remove("dyn-selected", "selected", "highlighted");
+                try {
+                    el.style.removeProperty("background-color");
+                    el.style.removeProperty("color");
+                    el.style.removeProperty("font-weight");
+                    el.style.removeProperty("border-left");
+                    el.style.removeProperty("padding-left");
+                } catch (e) {}
+            }
+
+            // Scroll target into view
+            let scrollParent = targetEntry.parentElement;
+            while (scrollParent && scrollParent !== document.body && scrollParent !== root) {
+                try {
+                    const overflowY = window.getComputedStyle(scrollParent).overflowY;
+                    if (overflowY === "auto" || overflowY === "scroll") {
+                        break;
+                    }
+                } catch (e) {
+                    break;
+                }
+                scrollParent = scrollParent.parentElement;
+            }
+            if (!scrollParent || scrollParent === document.body) {
+                scrollParent = root;
+            }
+
+            if (scrollParent && scrollParent.scrollHeight > scrollParent.clientHeight) {
+                const targetTop = targetEntry.offsetTop;
+                const parentHeight = scrollParent.clientHeight;
+                scrollParent.scrollTop = Math.max(0, targetTop - parentHeight / 2);
+            }
+
+            if (typeof targetEntry.scrollIntoView === "function") {
+                targetEntry.scrollIntoView({
+                    block: "center",
+                    inline: "nearest",
+                    behavior: "auto",
+                });
+            }
+
+            // Apply highlight classes and inline styles for maximum compatibility
+            targetEntry.classList.add("dyn-selected", "selected", "highlighted");
+            try {
+                targetEntry.style.setProperty("background-color", "#2563eb", "important");
+                targetEntry.style.setProperty("color", "#ffffff", "important");
+                targetEntry.style.setProperty("font-weight", "600", "important");
+                targetEntry.style.setProperty("border-left", "4px solid #60a5fa", "important");
+                targetEntry.style.setProperty("padding-left", "8px", "important");
+                const children = targetEntry.querySelectorAll("*");
+                for (const child of children) {
+                    child.style.setProperty("color", "#ffffff", "important");
+                }
+            } catch (e) {}
+
+            if (typeof targetEntry.focus === "function") {
+                try {
+                    targetEntry.focus();
+                } catch (e) {}
+            }
+        }
+    } catch (e) {
+        // if cannot find make it no error
+    }
+}
+
+function installContextMenuFocusHook() {
+    if (typeof LiteGraph === "undefined" || !LiteGraph.ContextMenu || LiteGraph.ContextMenu._dynFocusHooked) {
+        return;
+    }
+
+    const OrigContextMenu = LiteGraph.ContextMenu;
+    function DynContextMenu(values, options, windowRef) {
+        let instance;
+        try {
+            instance = Reflect.construct(OrigContextMenu, [values, options, windowRef], DynContextMenu);
+        } catch (e) {
+            instance = new OrigContextMenu(values, options, windowRef);
+        }
+
+        try {
+            let targetValue = null;
+            if (activeLoraContext && (Date.now() - activeLoraContext.time < 3000)) {
+                targetValue = activeLoraContext.value;
+                activeLoraContext = null;
+            }
+
+            if (!targetValue && options && options.event) {
+                const canvas = app.canvas || (typeof LGraphCanvas !== "undefined" && LGraphCanvas.active_canvas);
+                const currNode = canvas?.current_node || canvas?.node_over || canvas?.selected_nodes?.[0];
+                if (currNode && NODES[currNode.comfyClass || currNode.type] && currNode.pos) {
+                    const gm = canvas.graph_mouse;
+                    if (gm) {
+                        const localY = gm[1] - currNode.pos[1];
+                        const w = findWidgetAtPos(currNode, [0, localY]);
+                        if (w && w.name && w.name.startsWith("lora_")) {
+                            targetValue = w.value;
+                        }
+                    }
+                }
+            }
+
+            if (targetValue && targetValue !== "None") {
+                focusSelectedOption(instance, targetValue);
+                requestAnimationFrame(() => {
+                    try {
+                        focusSelectedOption(instance, targetValue);
+                    } catch (e) {}
+                });
+                setTimeout(() => {
+                    try {
+                        focusSelectedOption(instance, targetValue);
+                    } catch (e) {}
+                }, 50);
+                setTimeout(() => {
+                    try {
+                        focusSelectedOption(instance, targetValue);
+                    } catch (e) {}
+                }, 150);
+            }
+        } catch (e) {
+            // if cannot find make it no error
+        }
+
+        return instance;
+    }
+
+    DynContextMenu.prototype = OrigContextMenu.prototype;
+    Object.setPrototypeOf(DynContextMenu, OrigContextMenu);
+    DynContextMenu._dynFocusHooked = true;
+    LiteGraph.ContextMenu = DynContextMenu;
+}
+
+try {
+    injectHighlightStyles();
+    installContextMenuFocusHook();
+    hookCanvasProcessNodeWidgets();
+    setupCanvasClickListener();
+} catch (e) {}
+
 function syncSlots(node, mode) {
     if (!node.widgets) return;
     const countWidget = node.widgets.find((w) => w.name === "lora_count");
@@ -52,7 +449,10 @@ function syncSlots(node, mode) {
         const enabled = node.widgets.find((w) => w.name === `enabled_${n}`);
         const lora = node.widgets.find((w) => w.name === `lora_${n}`);
         if (enabled) enabled.label = `enabled_${n}`;
-        if (lora) lora.label = `lora_${n}`;
+        if (lora) {
+            lora.label = `lora_${n}`;
+            hookLoraWidget(lora, node);
+        }
         setWidgetVisible(enabled, visible);
         setWidgetVisible(lora, visible);
 
@@ -276,6 +676,27 @@ function hookCount(node, mode) {
 }
 
 function installHooks(nodeType, mode) {
+    const onMouseDown = nodeType.prototype.onMouseDown;
+    nodeType.prototype.onMouseDown = function (event, pos, canvas) {
+        try {
+            if (this.widgets && pos) {
+                for (const w of this.widgets) {
+                    if (!w || !w.name || !w.name.startsWith("lora_") || w.hidden) continue;
+                    if (w.last_y != null) {
+                        const h = w.computeSize ? w.computeSize()[1] : (typeof LiteGraph !== "undefined" ? LiteGraph.NODE_WIDGET_HEIGHT : 20);
+                        if (pos[1] >= w.last_y && pos[1] <= w.last_y + (h || 20)) {
+                            trackLoraWidgetClick(w, this);
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (e) {}
+        if (onMouseDown) {
+            return onMouseDown.apply(this, arguments);
+        }
+    };
+
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
         const r = onNodeCreated?.apply(this, arguments);
@@ -358,6 +779,15 @@ function installHooks(nodeType, mode) {
 
 app.registerExtension({
     name: "dynamic.lora.loader.stack",
+
+    setup() {
+        try {
+            injectHighlightStyles();
+            installContextMenuFocusHook();
+            hookCanvasProcessNodeWidgets();
+            setupCanvasClickListener();
+        } catch (e) {}
+    },
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const mode = NODES[nodeData.name];
